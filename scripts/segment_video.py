@@ -137,6 +137,26 @@ def save_cutout(image, mask, path):
     Image.fromarray(cutout).save(path)
 
 
+def mask_to_rle(mask):
+    """Encode a boolean mask as COCO-style uncompressed RLE.
+
+    Counts are run lengths in column-major (Fortran) order, always starting
+    with a run of background (0) pixels. The result is JSON-serializable and
+    can be decoded by pycocotools.mask.decode.
+    """
+    flat = np.asarray(mask, dtype=np.uint8).flatten(order="F")
+    # Boundaries where the value changes, framed by the start and end.
+    changes = np.flatnonzero(np.diff(flat)) + 1
+    boundaries = np.concatenate(([0], changes, [flat.size]))
+    run_lengths = np.diff(boundaries)
+    # COCO expects the first run to count 0s; prepend an empty run if the
+    # mask starts with a foreground pixel.
+    if flat.size and flat[0] == 1:
+        run_lengths = np.concatenate(([0], run_lengths))
+    height, width = mask.shape
+    return {"size": [int(height), int(width)], "counts": run_lengths.tolist()}
+
+
 def generate_random_colors(num_colors, seed=None):
     rng = np.random.default_rng(seed)
     return [
@@ -220,6 +240,7 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
     overlay_path = args.output_dir / f"{prefix}_overlay.png"
     frame_path = args.output_dir / f"{prefix}_frame.png"
     metadata_path = args.output_dir / f"{prefix}_metadata.json"
+    rle_path = args.output_dir / f"{prefix}_masks_rle.json"
     overlay_colors = get_overlay_colors(
         len(masks), args.overlay_color, seed=args.color_seed
     )
@@ -237,8 +258,8 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
         instance_paths.append(instance_path)
 
     instances = []
-    for idx, (score, box, instance_path) in enumerate(
-        zip(scores, boxes, instance_paths)
+    for idx, (score, box, instance_path, mask) in enumerate(
+        zip(scores, boxes, instance_paths, masks)
     ):
         instances.append(
             {
@@ -246,22 +267,29 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
                 "confidence": float(score),
                 "box_xyxy": [float(value) for value in box],
                 "mask_path": str(instance_path),
+                "mask_rle": mask_to_rle(mask),
             }
         )
 
+    rle_payload = {
+        "prompt": args.prompt,
+        "best_instance": best_idx,
+        "instances": [
+            {"index": inst["index"], "confidence": inst["confidence"], "rle": inst["mask_rle"]}
+            for inst in instances
+        ],
+    }
+    rle_path.write_text(json.dumps(rle_payload) + "\n")
+
     metadata = {
         "prompt": args.prompt,
-        "confidence_threshold": args.confidence_threshold,
-        "best_instance": best_idx,
-        "best_confidence": float(scores[best_idx]),
-        "frame_path": str(frame_path),
-        "best_mask_path": str(best_mask_path),
-        "combined_mask_path": str(combined_mask_path),
-        "best_cutout_path": str(cutout_path),
-        "overlay_path": str(overlay_path),
-        "overlay_color": args.overlay_color,
-        "overlay_colors_rgb": [list(color) for color in overlay_colors],
-        "instances": instances,
+        "instances": [
+            {
+                "box_xyxy": inst["box_xyxy"],
+                "mask_rle": inst["mask_rle"],
+            }
+            for inst in instances
+        ],
     }
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
@@ -276,6 +304,7 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
     print(f"Combined mask: {combined_mask_path}")
     print(f"Best cutout: {cutout_path}")
     print(f"Overlay: {overlay_path}")
+    print(f"Masks (RLE text): {rle_path}")
     print(f"Metadata: {metadata_path}")
     print("Instance masks:")
     for instance_path in instance_paths:
