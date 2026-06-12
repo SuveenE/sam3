@@ -2,10 +2,10 @@
 Segment an object in a video from a text prompt using SAM 3.
 
 Instead of segmenting a single image, this script walks through a video frame by
-frame looking for the requested object. It skips the first frame, then tries to
-detect the object on a candidate frame. If the best detection clears the
-confidence threshold (default 0.5) the results for that frame are written out and
-the script stops. Otherwise it jumps ahead a few frames (default 5) and tries
+frame looking for the requested object. It starts at the first frame (index 0)
+and tries to detect the object on a candidate frame. If the best detection clears
+the confidence threshold (default 0.5) the results for that frame are written out
+and the script stops. Otherwise it jumps ahead a few frames (default 5) and tries
 again.
 
 Usage:
@@ -82,9 +82,9 @@ def parse_args():
     parser.add_argument(
         "--start-frame",
         type=int,
-        default=1,
-        help="First frame index to evaluate. Defaults to 1 so the first frame "
-        "(index 0) is skipped.",
+        default=0,
+        help="First frame index to evaluate. Defaults to 0 so the very first "
+        "frame (index 0) is checked.",
     )
     parser.add_argument(
         "--frame-step",
@@ -233,14 +233,13 @@ def detect_in_frame(processor, image, prompt):
     return masks, scores, boxes, best_idx, float(scores[best_idx])
 
 
-def write_results(args, image, masks, scores, boxes, best_idx, prefix):
+def write_results(args, image, masks, scores, boxes, best_idx, prefix, frame_index):
     best_mask_path = args.output_dir / f"{prefix}_best_mask.png"
     combined_mask_path = args.output_dir / f"{prefix}_combined_mask.png"
     cutout_path = args.output_dir / f"{prefix}_best_cutout.png"
     overlay_path = args.output_dir / f"{prefix}_overlay.png"
     frame_path = args.output_dir / f"{prefix}_frame.png"
     metadata_path = args.output_dir / f"{prefix}_metadata.json"
-    rle_path = args.output_dir / f"{prefix}_masks_rle.json"
     overlay_colors = get_overlay_colors(
         len(masks), args.overlay_color, seed=args.color_seed
     )
@@ -271,18 +270,9 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
             }
         )
 
-    rle_payload = {
-        "prompt": args.prompt,
-        "best_instance": best_idx,
-        "instances": [
-            {"index": inst["index"], "confidence": inst["confidence"], "rle": inst["mask_rle"]}
-            for inst in instances
-        ],
-    }
-    rle_path.write_text(json.dumps(rle_payload) + "\n")
-
     metadata = {
         "prompt": args.prompt,
+        "frame_index": int(frame_index),
         "instances": [
             {
                 "box_xyxy": inst["box_xyxy"],
@@ -294,6 +284,7 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
     print(f"Found {len(masks)} mask(s) for prompt: {args.prompt!r}")
+    print(f"Frame index: {frame_index}")
     for idx, (score, box) in enumerate(zip(scores, boxes)):
         box_text = ", ".join(f"{value:.1f}" for value in box)
         print(f"  [{idx}] confidence={score:.3f}, box=[{box_text}]")
@@ -304,7 +295,6 @@ def write_results(args, image, masks, scores, boxes, best_idx, prefix):
     print(f"Combined mask: {combined_mask_path}")
     print(f"Best cutout: {cutout_path}")
     print(f"Overlay: {overlay_path}")
-    print(f"Masks (RLE text): {rle_path}")
     print(f"Metadata: {metadata_path}")
     print("Instance masks:")
     for instance_path in instance_paths:
@@ -380,7 +370,7 @@ def main():
                 )
                 prefix = f"{base_prefix}_frame{frame_index:06d}"
                 write_results(
-                    args, image, masks, scores, boxes, best_idx, prefix
+                    args, image, masks, scores, boxes, best_idx, prefix, frame_index
                 )
                 return
 
