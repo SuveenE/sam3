@@ -2,6 +2,8 @@
 
 # pyre-unsafe
 
+from __future__ import annotations
+
 import os
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
@@ -9,7 +11,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from sam3.model.model_misc import SAM3Output
-from sam3.model.sam1_task_predictor import SAM3InteractiveImagePredictor
 from sam3.model.vl_combiner import SAM3VLBackbone
 from sam3.perflib.nms import nms_masks
 from sam3.train.data.collator import BatchedDatapoint
