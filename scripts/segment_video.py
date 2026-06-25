@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 
@@ -121,7 +122,8 @@ def parse_args():
 
 
 def as_numpy_mask(mask_tensor):
-    mask = mask_tensor.detach().cpu().numpy()
+    # .float() first: bf16 autocast outputs aren't convertible by NumPy directly.
+    mask = mask_tensor.detach().cpu().float().numpy()
     if mask.ndim == 3 and mask.shape[0] == 1:
         mask = mask[0]
     return mask.astype(bool)
@@ -207,30 +209,42 @@ def read_frame(capture, frame_index):
     return Image.fromarray(frame_rgb)
 
 
-def detect_in_frame(processor, image, prompt):
+def detect_in_frame(processor, image, prompt, device="cpu"):
     """Run the prompt on a single frame.
 
     Returns a tuple of (masks, scores, boxes, best_idx, best_score). When nothing
     is returned the masks/scores/boxes lists are empty and best_score is the best
     sub-threshold candidate (or None if there were no candidates at all).
+
+    On CUDA the model forward passes run under bfloat16 autocast, matching how
+    SAM 3's own predictors run inference. This keeps activations and weights in a
+    single dtype through the fused MLP kernel (which casts to bf16 on GPU); without
+    it, the bf16 fused output collides with the fp32 ``fc2`` weights. On CPU the
+    context is a no-op so the existing fp32 path is unchanged.
     """
-    state = processor.set_image(image)
-    output = processor.set_text_prompt(state=state, prompt=prompt)
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if device == "cuda"
+        else contextlib.nullcontext()
+    )
+    with autocast_ctx:
+        state = processor.set_image(image)
+        output = processor.set_text_prompt(state=state, prompt=prompt)
 
-    scores_tensor = output["scores"]
-    if len(scores_tensor) == 0:
-        fallback_output = processor.set_confidence_threshold(0.0, state=state)
-        fallback_scores = fallback_output["scores"].detach().cpu().numpy()
-        best_score = (
-            float(fallback_scores.max()) if len(fallback_scores) else None
-        )
-        return [], np.array([]), np.array([]), None, best_score
+        scores_tensor = output["scores"]
+        if len(scores_tensor) == 0:
+            fallback_output = processor.set_confidence_threshold(0.0, state=state)
+            fallback_scores = fallback_output["scores"].detach().cpu().float().numpy()
+            best_score = (
+                float(fallback_scores.max()) if len(fallback_scores) else None
+            )
+            return [], np.array([]), np.array([]), None, best_score
 
-    scores = scores_tensor.detach().cpu().numpy()
-    boxes = output["boxes"].detach().cpu().numpy()
-    masks = [as_numpy_mask(mask) for mask in output["masks"]]
-    best_idx = int(scores.argmax())
-    return masks, scores, boxes, best_idx, float(scores[best_idx])
+        scores = scores_tensor.detach().cpu().float().numpy()
+        boxes = output["boxes"].detach().cpu().float().numpy()
+        masks = [as_numpy_mask(mask) for mask in output["masks"]]
+        best_idx = int(scores.argmax())
+        return masks, scores, boxes, best_idx, float(scores[best_idx])
 
 
 def write_results(args, image, masks, scores, boxes, best_idx, prefix, frame_index):
@@ -359,7 +373,7 @@ def main():
 
             attempts += 1
             masks, scores, boxes, best_idx, best_score = detect_in_frame(
-                processor, image, args.prompt
+                processor, image, args.prompt, device
             )
 
             if best_idx is not None and best_score >= args.confidence_threshold:

@@ -30,6 +30,8 @@ dependencies = [
     "typing_extensions",
     "huggingface_hub",
     "einops",
+    "opencv-python>=4.11.0.86",
+    "pycocotools>=2.0.11",
 ]
 
 [project.optional-dependencies]
